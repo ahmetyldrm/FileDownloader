@@ -1,5 +1,4 @@
 
-import concurrent.futures as cf
 import requests
 from urllib.parse import urlparse
 import re
@@ -8,6 +7,18 @@ from tqdm.auto import tqdm
 import os.path
 from abc import ABC, abstractmethod
 from fake_useragent import UserAgent
+from queue import Queue
+import threading
+import time
+
+
+logging.basicConfig(filename="log.txt", filemode="w",
+                    format="%(levelname)s %(message)s", level=logging.DEBUG)
+
+
+class ShutdownException(Exception):
+    def __str__(self):
+        return "Shutdown signal received"
 
 
 class Downloader(ABC):
@@ -27,8 +38,10 @@ class Downloader(ABC):
     def _get_download_url(self) -> str:
         return ""
 
-    def download(self, target_dir='.'):
-        response = requests.get(self.download_url, stream=True)
+    def download(self, target_dir='.', shutdown_flag: threading.Event = None):
+        ua = UserAgent()
+        headers = {'User-Agent': ua.chrome}
+        response = requests.get(self.download_url, stream=True, headers=headers, verify=False)
         if isinstance(self.progress, tqdm):
             self.progress.desc = self.file_name
             self.progress.total = float(response.headers["Content-Length"])
@@ -37,20 +50,36 @@ class Downloader(ABC):
             self.progress.unit_divisor = self.chunk_size
 
         if self.file_name and os.path.isdir(target_dir):
-            with open(os.path.join(target_dir, self.file_name), 'wb') as handle:
-                # for data in tqdm(response.iter_content(chunk_size=1024),
-                #                  unit="KiB", unit_scale=True, unit_divisor=1024, position=tqdmpos,
-                #                  total=ceil(int(response.headers["Content-Length"]) / 1024)):
-                try:
+            try:
+                with open(os.path.join(target_dir, self.file_name), 'wb') as handle:
+                    # for data in tqdm(response.iter_content(chunk_size=1024),
+                    #                  unit="KiB", unit_scale=True, unit_divisor=1024, position=tqdmpos,
+                    #                  total=ceil(int(response.headers["Content-Length"]) / 1024)):
                     for data in response.iter_content(chunk_size=self.chunk_size):
+                        if shutdown_flag and isinstance(shutdown_flag, threading.Event) and shutdown_flag.isSet():
+                            raise ShutdownException
+
                         size = handle.write(data)
+
                         if isinstance(self.progress, tqdm):
                             self.progress.update(size)
-                except KeyboardInterrupt:
-                    response.close()
-                    if isinstance(self.progress, tqdm):
-                        self.progress.close()
-                    return False
+
+            except ShutdownException:
+                logging.warning("Shutdown signal reeceived")
+                return False
+
+            except Exception as e:
+                logging.error(f"{str(e)}")
+                return False
+
+            finally:
+                print("in finally")
+                response.close()
+                logging.debug(f"'{self.url}' closed")
+                if isinstance(self.progress, tqdm):
+                    self.progress.close()
+                    logging.debug(f"'{self.progress.desc}' closed")
+
         return True
 
 
@@ -58,7 +87,7 @@ class ZippyshareDownloader(Downloader):
     def __init__(self, url, *args, **kwargs):
         ua = UserAgent()
         headers = {'User-Agent': ua.chrome}
-        self.response = requests.get(url, headers=headers)
+        self.response = requests.get(url, headers=headers, verify=False)
         self.dl_button_href = self._get_dl_button_href()
         super().__init__(url, *args, **kwargs)
 
@@ -102,48 +131,57 @@ class PixeldrainDownloader(Downloader):
 
 
 def main():
-    logging.basicConfig(filename="log.txt", filemode="w",
-                        format="%(levelname)s %(message)s")
-
     filename = "urls.txt"
 
     with open(filename, "r") as _file:
         urllist = [i.strip() for i in _file.readlines()]
 
-    urllist = urllist[28:]
+    num_urllist = enumerate(urllist[29:])
 
     max_threads = 4
-    active_threads = {}
-    with cf.ThreadPoolExecutor(max_workers=max_threads) as e:
-        for num, url in enumerate(urllist):
-            progress = tqdm(position=num, mininterval=1)
-            downloader = ZippyshareDownloader(url, progress=progress)
-            future = e.submit(downloader.download, target_dir=".\\downloads")
-            active_threads[future] = url
 
-            while len(active_threads) == max_threads:
-                finished = False
-                while not finished:
-                    try:
-                        completed_future, running_futures = cf.wait(active_threads.keys(),
-                                                                    return_when=cf.FIRST_COMPLETED,
-                                                                    timeout=0.01)
-                        if completed_future:
-                            finished = True
-                            finished_future = completed_future.pop()
-                    except cf.TimeoutError:
-                        pass
-                    except KeyboardInterrupt:
-                        e.shutdown(cancel_futures=True, wait=False)
-                        logging.error(f"'Keyboard interrupt' on '{active_threads.get(finished_future)}'")
-                        quit()
-                try:
-                    if finished_future.result() is True:
-                        logging.info(f"'{active_threads.get(finished_future)}' successfully downloaded")
-                except Exception as err:
-                    logging.error(f"'{str(err)}' on '{active_threads.get(finished_future)}'")
+    url_que = Queue()
+    done_que = Queue()
+    error_que = Queue()
 
-                active_threads.pop(finished_future)
+    threads = []
+
+    shutdown_flag = threading.Event()
+
+    def worker():
+        while not url_que.empty() and not shutdown_flag.isSet():
+            _num, _url = url_que.get()
+
+            progress = tqdm(position=_num, mininterval=1)
+            downloader = ZippyshareDownloader(_url, progress=progress)
+            success = downloader.download(target_dir=".\\downloads", shutdown_flag=shutdown_flag)
+            if success:
+                done_que.put(downloader.file_name)
+            else:
+                error_que.put(downloader.file_name)
+
+            url_que.task_done()
+
+    for num, url in num_urllist:
+        url_que.put((num, url))
+
+    for _ in range(max_threads):
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        threads.append(thread)
+    try:
+        while not url_que.empty():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        shutdown_flag.set()
+        for t in threads:
+            t.join(5)
+            print(f"'{t.name}' terminated")
+
+    while not done_que.empty():
+        logging.debug(f"Successfully downloaded: '{done_que.get()}'")
+    while not error_que.empty():
+        logging.error(f"Could not downloaded: '{error_que.get()}'")
 
 
 if __name__ == '__main__':
