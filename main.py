@@ -1,11 +1,13 @@
-from concurrent.futures.thread import ThreadPoolExecutor
 
+import concurrent.futures as cf
 import requests
 from urllib.parse import urlparse
 import re
+import logging
 from tqdm.auto import tqdm
 import os.path
 from abc import ABC, abstractmethod
+from fake_useragent import UserAgent
 
 
 class Downloader(ABC):
@@ -18,16 +20,17 @@ class Downloader(ABC):
         self.download_url = self._get_download_url()
 
     @abstractmethod
-    def _get_file_name(self):
+    def _get_file_name(self) -> str:
         return ""
 
     @abstractmethod
-    def _get_download_url(self):
+    def _get_download_url(self) -> str:
         return ""
 
     def download(self, target_dir='.'):
         response = requests.get(self.download_url, stream=True)
         if isinstance(self.progress, tqdm):
+            self.progress.desc = self.file_name
             self.progress.total = float(response.headers["Content-Length"])
             self.progress.unit = "b"
             self.progress.unit_scale = True
@@ -38,15 +41,24 @@ class Downloader(ABC):
                 # for data in tqdm(response.iter_content(chunk_size=1024),
                 #                  unit="KiB", unit_scale=True, unit_divisor=1024, position=tqdmpos,
                 #                  total=ceil(int(response.headers["Content-Length"]) / 1024)):
-                for data in response.iter_content(chunk_size=self.chunk_size):
-                    size = handle.write(data)
+                try:
+                    for data in response.iter_content(chunk_size=self.chunk_size):
+                        size = handle.write(data)
+                        if isinstance(self.progress, tqdm):
+                            self.progress.update(size)
+                except KeyboardInterrupt:
+                    response.close()
                     if isinstance(self.progress, tqdm):
-                        self.progress.update(size)
+                        self.progress.close()
+                    return False
+        return True
 
 
 class ZippyshareDownloader(Downloader):
     def __init__(self, url, *args, **kwargs):
-        self.response = requests.get(url)
+        ua = UserAgent()
+        headers = {'User-Agent': ua.chrome}
+        self.response = requests.get(url, headers=headers)
         self.dl_button_href = self._get_dl_button_href()
         super().__init__(url, *args, **kwargs)
 
@@ -90,24 +102,48 @@ class PixeldrainDownloader(Downloader):
 
 
 def main():
-    # url = "https://pixeldrain.com/u/KtDbn3kD"
-    # url = "https://www54.zippyshare.com/v/TxFPnFPu/file.html"
-    # downloader = FileDownloader(url)
-    # progress = tqdm()
-    # downloader = ZippyshareDownloader(url, progress=progress)
-    # print(downloader.download_url)
-    # print(downloader.file_name)
-    # downloader.download()
+    logging.basicConfig(filename="log.txt", filemode="w",
+                        format="%(levelname)s %(message)s")
 
-    url_list = ["https://www54.zippyshare.com/v/avWW6TGd/file.html",
-                "https://www7.zippyshare.com/v/i1OTOQGh/file.html",
-                "https://www79.zippyshare.com/v/H1P2p58m/file.html",
-                "https://www52.zippyshare.com/v/TVHw5L1E/file.html"]
-    with ThreadPoolExecutor(max_workers=4) as e:
-        for num, url in enumerate(url_list):
-            progress = tqdm(position=num, ncols=80, mininterval=1)
+    filename = "urls.txt"
+
+    with open(filename, "r") as _file:
+        urllist = [i.strip() for i in _file.readlines()]
+
+    urllist = urllist[28:]
+
+    max_threads = 4
+    active_threads = {}
+    with cf.ThreadPoolExecutor(max_workers=max_threads) as e:
+        for num, url in enumerate(urllist):
+            progress = tqdm(position=num, mininterval=1)
             downloader = ZippyshareDownloader(url, progress=progress)
-            e.submit(downloader.download)
+            future = e.submit(downloader.download, target_dir=".\\downloads")
+            active_threads[future] = url
+
+            while len(active_threads) == max_threads:
+                finished = False
+                while not finished:
+                    try:
+                        completed_future, running_futures = cf.wait(active_threads.keys(),
+                                                                    return_when=cf.FIRST_COMPLETED,
+                                                                    timeout=0.01)
+                        if completed_future:
+                            finished = True
+                            finished_future = completed_future.pop()
+                    except cf.TimeoutError:
+                        pass
+                    except KeyboardInterrupt:
+                        e.shutdown(cancel_futures=True, wait=False)
+                        logging.error(f"'Keyboard interrupt' on '{active_threads.get(finished_future)}'")
+                        quit()
+                try:
+                    if finished_future.result() is True:
+                        logging.info(f"'{active_threads.get(finished_future)}' successfully downloaded")
+                except Exception as err:
+                    logging.error(f"'{str(err)}' on '{active_threads.get(finished_future)}'")
+
+                active_threads.pop(finished_future)
 
 
 if __name__ == '__main__':
