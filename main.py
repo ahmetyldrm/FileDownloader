@@ -11,6 +11,7 @@ from queue import Queue
 import threading
 import time
 
+# requests.packages.urllib3.disable_warnings()
 
 logging.basicConfig(filename="log.txt", filemode="w",
                     format="%(levelname)s %(message)s", level=logging.DEBUG)
@@ -41,7 +42,7 @@ class Downloader(ABC):
     def download(self, target_dir='.', shutdown_flag: threading.Event = None):
         ua = UserAgent()
         headers = {'User-Agent': ua.chrome}
-        response = requests.get(self.download_url, stream=True, headers=headers)
+        response = requests.get(self.download_url, stream=True, headers=headers, verify=False)
         if isinstance(self.progress, tqdm):
             self.progress.desc = self.file_name
             self.progress.total = float(response.headers["Content-Length"])
@@ -87,7 +88,7 @@ class ZippyshareDownloader(Downloader):
     def __init__(self, url, *args, **kwargs):
         ua = UserAgent()
         headers = {'User-Agent': ua.chrome}
-        self.response = requests.get(url, headers=headers)
+        self.response = requests.get(url, headers=headers, verify=False)
         self.dl_button_href = self._get_dl_button_href()
         super().__init__(url, *args, **kwargs)
 
@@ -116,7 +117,7 @@ class PixeldrainDownloader(Downloader):
         super().__init__(url, *args, **kwargs)
 
     def _get_file_name(self):
-        response = requests.get(self.url)
+        response = requests.get(self.url, verify=False)
         match = re.search("<title>(.*?)</title>", response.text[:512])
         if match:
             title = match.group(1).split()[0].strip()
@@ -131,14 +132,16 @@ class PixeldrainDownloader(Downloader):
 
 
 def main():
+    # global counter
     filename = "urls.txt"
 
     with open(filename, "r") as _file:
-        urllist = [i.strip() for i in _file.readlines()]
+        urllist = [i.strip() for i in _file.readlines() if i.strip() != ""]
+    urllist = urllist[64:]
+    # num_urllist = enumerate(urllist[49:])
+    # num_urllist = enumerate(urllist)
 
-    num_urllist = enumerate(urllist[37:])
-
-    max_threads = 4
+    max_threads = 2
 
     url_que = Queue()
     done_que = Queue()
@@ -148,11 +151,11 @@ def main():
 
     shutdown_flag = threading.Event()
 
-    def worker():
+    def worker(progress_pos):
         while not url_que.empty() and not shutdown_flag.isSet():
-            _num, _url = url_que.get()
+            _url = url_que.get()
 
-            progress = tqdm(position=_num, mininterval=1)
+            progress = tqdm(position=progress_pos, mininterval=1)
             downloader = ZippyshareDownloader(_url, progress=progress)
             success = downloader.download(target_dir=".\\downloads", shutdown_flag=shutdown_flag)
             if success:
@@ -160,18 +163,28 @@ def main():
             else:
                 error_que.put(downloader.file_name)
 
-            url_que.task_done()
+            # url_que.task_done()
 
-    for num, url in num_urllist:
-        url_que.put((num, url))
+    for url in urllist:
+        url_que.put(url)
 
-    for _ in range(max_threads):
-        thread = threading.Thread(target=worker, daemon=True)
+    for i in range(max_threads):
+        thread = threading.Thread(target=worker, args=(i,), daemon=True)
         thread.start()
         threads.append(thread)
     try:
-        while not url_que.empty():
+        not_finished = True
+
+        while not_finished:
             time.sleep(1)
+
+            if url_que.empty():
+                not_finished = False
+                for t in threads:
+                    if t.is_alive():
+                        not_finished = True
+                        break
+
     except KeyboardInterrupt:
         shutdown_flag.set()
         for t in threads:
