@@ -132,12 +132,14 @@ class PixeldrainDownloader(Downloader):
 
 
 def main():
-    # global counter
+    # for disabling ssl verify warning
+    requests.packages.urllib3.disable_warnings()
+
     filename = "urls.txt"
 
     with open(filename, "r") as _file:
         urllist = [i.strip() for i in _file.readlines() if i.strip() != ""]
-    urllist = urllist[64:]
+    urllist = urllist[68:]
     # num_urllist = enumerate(urllist[49:])
     # num_urllist = enumerate(urllist)
 
