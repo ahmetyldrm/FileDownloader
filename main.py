@@ -41,7 +41,7 @@ class Downloader(ABC):
     def download(self, target_dir='.', shutdown_flag: threading.Event = None):
         ua = UserAgent()
         headers = {'User-Agent': ua.chrome}
-        response = requests.get(self.download_url, stream=True, headers=headers, verify=False)
+        response = requests.get(self.download_url, stream=True, headers=headers)
         if isinstance(self.progress, tqdm):
             self.progress.desc = self.file_name
             self.progress.total = float(response.headers["Content-Length"])
@@ -73,13 +73,13 @@ class Downloader(ABC):
                 return False
 
             finally:
-                print("in finally")
                 response.close()
                 logging.debug(f"'{self.url}' closed")
                 if isinstance(self.progress, tqdm):
                     self.progress.close()
                     logging.debug(f"'{self.progress.desc}' closed")
 
+        logging.debug(f"'{self.file_name}' downloaded")
         return True
 
 
@@ -87,7 +87,7 @@ class ZippyshareDownloader(Downloader):
     def __init__(self, url, *args, **kwargs):
         ua = UserAgent()
         headers = {'User-Agent': ua.chrome}
-        self.response = requests.get(url, headers=headers, verify=False)
+        self.response = requests.get(url, headers=headers)
         self.dl_button_href = self._get_dl_button_href()
         super().__init__(url, *args, **kwargs)
 
@@ -136,7 +136,7 @@ def main():
     with open(filename, "r") as _file:
         urllist = [i.strip() for i in _file.readlines()]
 
-    num_urllist = enumerate(urllist[29:])
+    num_urllist = enumerate(urllist[37:])
 
     max_threads = 4
 
@@ -176,7 +176,7 @@ def main():
         shutdown_flag.set()
         for t in threads:
             t.join(5)
-            print(f"'{t.name}' terminated")
+            logging.debug(f"'{t.name}' terminated")
 
     while not done_que.empty():
         logging.debug(f"Successfully downloaded: '{done_que.get()}'")
